@@ -36,6 +36,8 @@ SYNC_BYTE2 = b'\x5A'
 
 GET_INFO_BYTE = b'\x50'
 GET_HEALTH_BYTE = b'\x52'
+GET_SAMPLERATE_BYTE = b'\x59'
+GET_LIDAR_CONF_BYTE = b'\x84'
 
 STOP_BYTE = b'\x25'
 RESET_BYTE = b'\x40'
@@ -49,9 +51,11 @@ _SCAN_TYPE = {
 DESCRIPTOR_LEN = 7
 INFO_LEN = 20
 HEALTH_LEN = 3
+SAMPLERATE_LEN = 4
 
 INFO_TYPE = 4
 HEALTH_TYPE = 6
+SAMPLERATE_TYPE = 21
 
 # Constants & Command to start A2 motor
 MAX_MOTOR_PWM = 1023
@@ -64,6 +68,15 @@ _HEALTH_STATUSES = {
     2: 'Error',
 }
 
+# Configuration entries for GET_LIDAR_CONF
+_CONF_ENTRIES = {
+    'CONF_SCAN_MODE_COUNT' : b'\x70',
+    'CONF_SCAN_MODE_US_PER_SAMPLE' : b'\x71',
+    'CONF_SCAN_MODE_MAX_DIST' : b'\x74',
+    'CONF_SCAN_MODE_ANS_TYPE' : b'\x75',
+    'CONF_SCAN_MODE_TYPICAL' : b'\x7c',
+    'CONF_SCAN_MODE_NAME' : b'\x7f'
+}
 
 class RPLidarException(Exception):
     '''Basic exception class for RPLidar'''
@@ -106,7 +119,7 @@ def _process_express_scan(data, new_angle, trame):
 class RPLidar(object):
     '''Class for communicating with RPLidar rangefinder scanners'''
 
-    def __init__(self, port, baudrate=115200, timeout=1, logger=None):
+    def __init__(self, port='/dev/ttyUSB0', baudrate=115200, timeout=1, logger=None):
         '''Initilize RPLidar object for communicating with the sensor.
 
         Parameters
@@ -141,9 +154,12 @@ class RPLidar(object):
             self.disconnect()
         try:
             self._serial = serial.Serial(
-                self.port, self.baudrate,
-                parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
-                timeout=self.timeout)
+                            self.port,
+                            self.baudrate,
+                            parity=serial.PARITY_NONE,
+                            stopbits=serial.STOPBITS_ONE,
+                            timeout=self.timeout,
+                            dsrdtr=True)
         except serial.SerialException as err:
             raise RPLidarException('Failed to connect to the sensor '
                                    'due to: %s' % err)
@@ -173,7 +189,7 @@ class RPLidar(object):
         '''Starts sensor motor'''
         self.logger.info('Starting motor')
         # For A1
-        self._serial.setDTR(False)
+        self._serial.dtr = False
 
         # For A2
         self._set_pwm(self._motor_speed)
@@ -181,12 +197,12 @@ class RPLidar(object):
 
     def stop_motor(self):
         '''Stops sensor motor'''
-        self.logger.info('Stoping motor')
+        self.logger.info('Stopping motor')
         # For A2
         self._set_pwm(0)
         time.sleep(.001)
         # For A1
-        self._serial.setDTR(True)
+        self._serial.dtr = True
         self.motor_running = False
 
     def _send_payload_cmd(self, cmd, payload):
@@ -226,6 +242,39 @@ class RPLidar(object):
         self.logger.debug('Received data: %s', _showhex(data))
         return data
 
+    def get_samplerate(self):
+        '''Get the single measurement duration
+            
+        Returns
+        -------
+        dict
+            Dictionary with the duration in microsecond(uS)
+        '''
+        self._send_cmd(GET_SAMPLERATE_BYTE)
+        dsize, is_single, dtype = self._read_descriptor()
+        if dsize != SAMPLERATE_LEN:
+            raise RPLidarException('Wrong get_samplerate reply length')
+        if not is_single:
+            raise RPLidarException('Not a single response mode')
+        if dtype != SAMPLERATE_TYPE:
+            raise RPLidarException('Wrong response data type')
+        raw = self._read_response(dsize)
+        data = {
+            'Tstandard': (_b2i(raw[0]) + (_b2i(raw[1]) << 8)),
+            'Texpress': (_b2i(raw[2]) + (_b2i(raw[3]) << 8)),
+        }
+        return data
+    
+    #TODO Complete this method
+    def get_lidar_conf(self):
+        '''Device configuration query command
+
+        Returns
+        -------
+
+        '''
+        self._send_cmd(GET_LIDAR_CONF_BYTE)
+
     def get_info(self):
         '''Get device information
 
@@ -234,9 +283,6 @@ class RPLidar(object):
         dict
             Dictionary with the sensor information
         '''
-        if self._serial.inWaiting() > 0:
-            return ('Data in buffer, you can\'t have info ! '
-                    'Run clean_input() to emptied the buffer.')
         self._send_cmd(GET_INFO_BYTE)
         dsize, is_single, dtype = self._read_descriptor()
         if dsize != INFO_LEN:
@@ -271,9 +317,6 @@ class RPLidar(object):
         error_code : int
             The related error code that caused a warning/error.
         '''
-        if self._serial.inWaiting() > 0:
-            return ('Data in buffer, you can\'t have info ! '
-                    'Run clean_input() to emptied the buffer.')
         self.logger.info('Asking for health')
         self._send_cmd(GET_HEALTH_BYTE)
         dsize, is_single, dtype = self._read_descriptor()
